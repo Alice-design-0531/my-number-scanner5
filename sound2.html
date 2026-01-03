@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AI 語音數字辨識 - 手機相容版</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/speech-commands@0.5.4/dist/speech-commands.min.js"></script>
+    
+    <style>
+        :root { --primary-color: #4285f4; --success-color: #34a853; --danger-color: #ea4335; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f0f2f5; margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .container { background: white; padding: 30px; border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); text-align: center; width: 90%; max-width: 450px; }
+        h1 { color: #1a73e8; font-size: 1.5rem; margin-bottom: 5px; }
+        #status { color: #666; font-size: 0.85rem; margin-bottom: 15px; min-height: 1.2em; }
+        #current-word { font-size: 6rem; font-weight: bold; color: var(--primary-color); margin: 15px 0; height: 140px; line-height: 140px; border: 2px dashed #ddd; border-radius: 15px; background: #fafafa; }
+        .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 20px; }
+        button { padding: 15px; font-size: 1rem; cursor: pointer; border: none; border-radius: 10px; font-weight: bold; transition: all 0.2s; -webkit-tap-highlight-color: transparent; }
+        #start-btn { background-color: var(--success-color); color: white; }
+        #stop-btn { background-color: var(--danger-color); color: white; }
+        #clear-btn { background-color: #8e8e8e; color: white; grid-column: span 2; }
+        button:disabled { background-color: #ccc !important; cursor: not-allowed; opacity: 0.7; }
+        .history-box { text-align: left; background: #f8f9fa; padding: 15px; border-radius: 10px; border: 1px solid #eee; }
+        #history { font-size: 1.8rem; color: #333; word-break: break-all; min-height: 1.5em; letter-spacing: 8px; font-family: monospace; }
+        .hint { font-size: 0.8rem; color: #999; margin-top: 15px; line-height: 1.4; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>語音數字辨識 (0-9)</h1>
+    <div id="status">正在初始化模型...</div>
+    
+    <div id="current-word">---</div>
+    
+    <div class="controls">
+        <button id="start-btn" onclick="startListening()" disabled>開始錄音</button>
+        <button id="stop-btn" onclick="stopListening()" disabled>停止錄音</button>
+        <button id="clear-btn" onclick="clearHistory()">清除所有紀錄</button>
+    </div>
+
+    <div class="history-box">
+        <strong style="font-size: 0.9rem; color: #555;">辨識序列：</strong>
+        <div id="history">---</div>
+    </div>
+    
+    <p class="hint">手機用戶：若無反應請確保網址為 HTTPS<br>並點擊「開始」後允許麥克風權限</p>
+</div>
+
+<script>
+    let recognizer;
+    let fullSequence = []; 
+    let lastWord = ""; 
+    let lastTime = 0;
+
+    // 數字對照表：過濾非數字並轉為阿拉伯數字
+    const numberMap = {
+        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+        "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9"
+    };
+
+    // 頁面載入初始化
+    window.onload = async () => {
+        const status = document.getElementById('status');
+        const startBtn = document.getElementById('start-btn');
+
+        try {
+            // 建立辨識器
+            recognizer = speechCommands.create("BROWSER_FFT");
+            // 預先加載模型，提升點擊後的反應速度
+            await recognizer.ensureModelLoaded();
+            
+            status.innerText = "● 系統就緒，請點擊開始";
+            status.style.color = "#34a853";
+            startBtn.disabled = false;
+        } catch (err) {
+            status.innerText = "❌ 模型載入失敗，請重新整理";
+            status.style.color = "#ea4335";
+            console.error(err);
+        }
+    };
+
+    // 開始監聽 (核心修復版)
+    async function startListening() {
+        const status = document.getElementById('status');
+        const currentDiv = document.getElementById('current-word');
+        
+        try {
+            // 修復手機 Safari/Chrome 音訊封鎖：主動請求媒體串流
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            
+            // 喚醒 Web Audio Context
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            const audioCtx = new AudioContext();
+            if (audioCtx.state === 'suspended') {
+                await audioCtx.resume();
+            }
+
+            status.innerText = "● 正在聆聽中...";
+            status.style.color = "#ea4335";
+            document.getElementById('start-btn').disabled = true;
+            document.getElementById('stop-btn').disabled = false;
+
+            // 開始模型監聽
+            recognizer.listen(result => {
+                const labels = recognizer.wordLabels();
+                const maxScoreIndex = result.scores.indexOf(Math.max(...result.scores));
+                const word = labels[maxScoreIndex];
+                const now = Date.now();
+
+                // 只有在 0-9 對照表內的詞才處理
+                if (numberMap.hasOwnProperty(word)) {
+                    // 根據是否為同一個字，設定不同的冷卻時間 (1.5秒 vs 0.8秒)
+                    const cooldown = (word === lastWord) ? 1500 : 800;
+
+                    if (now - lastTime > cooldown) {
+                        const digit = numberMap[word];
+                        currentDiv.innerText = digit;
+                        fullSequence.push(digit);
+                        updateHistory();
+
+                        lastWord = word;
+                        lastTime = now;
+                    }
+                }
+            }, {
+                probabilityThreshold: 0.85, // 提高門檻減少誤判
+                overlapFactor: 0.4          // 降低掃描頻率減少重疊
+            });
+
+        } catch (err) {
+            console.error("權限錯誤:", err);
+            status.innerText = "❌ 麥克風存取失敗";
+            alert("請確保已在瀏覽器設定中允許麥克風權限，且網址為 HTTPS。");
+        }
+    }
+
+    // 停止監聽
+    async function stopListening() {
+        if (recognizer && recognizer.isListening()) {
+            await recognizer.stopListening();
+            document.getElementById('start-btn').disabled = false;
+            document.getElementById('stop-btn').disabled = true;
+            document.getElementById('status').innerText = "● 已停止錄音";
+            document.getElementById('status').style.color = "#666";
+            document.getElementById('current-word').innerText = "---";
+            lastWord = ""; // 重置狀態
+        }
+    }
+
+    // 更新歷史介面
+    function updateHistory() {
+        const historyDiv = document.getElementById('history');
+        historyDiv.innerText = fullSequence.length > 0 ? fullSequence.join("") : "---";
+    }
+
+    // 清除紀錄
+    function clearHistory() {
+        fullSequence = [];
+        lastWord = "";
+        updateHistory();
+        document.getElementById('current-word').innerText = "---";
+    }
+</script>
+
+</body>
+</html>
